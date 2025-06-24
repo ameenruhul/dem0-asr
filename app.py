@@ -2,6 +2,7 @@
 
 import streamlit as st
 import io
+import os
 import numpy as np
 import torch
 import soundfile as sf
@@ -12,53 +13,61 @@ from transformers import (
     WhisperForConditionalGeneration,
     pipeline
 )
-from peft import PeftModelForSeq2SeqLM
+from peft import PeftConfig, get_peft_model
+from safetensors.torch import load_file as load_safetensors
 
 @st.cache_resource(show_spinner=False)
 def load_asr():
-    """Load base Whisper and LoRA adapter into an ASR pipeline."""
-    # 1) Load the base multilingual Whisper
+    """Load base Whisper + manually attach your local LoRA adapter."""
+    # 1) Base multilingual Whisper in float16, auto‐sharded on GPU/CPU
     base = WhisperForConditionalGeneration.from_pretrained(
         "unsloth/whisper-large-v3",
         torch_dtype=torch.float16,
         device_map="auto",
     )
-    # 2) Apply your fine-tuned LoRA weights from local folder only
-    model = PeftModelForSeq2SeqLM.from_pretrained(
-        base,
-        "/workspace/training_outputs/final_optimized_model",
-        torch_dtype=torch.float16,
-        device_map="auto",
-        local_files_only=True,    # ← prevents any Hub download attempts
-    ).eval()
 
-    # 3) Load processor for both feature extractor & tokenizer
+    # 2) Load your adapter config & build the PEFT wrapper
+    adapter_dir = "/workspace/training_outputs/final_optimized_model"
+    cfg_path = os.path.join(adapter_dir, "adapter_config.json")
+    weights_path = os.path.join(adapter_dir, "adapter_model.safetensors")
+
+    if not os.path.isfile(cfg_path) or not os.path.isfile(weights_path):
+        raise FileNotFoundError(
+            "Couldn’t find adapter_config.json or adapter_model.safetensors in:\n"
+            f"  {adapter_dir}\n"
+            "Did you run `peft_model.save_pretrained(...)` when training?"
+        )
+
+    peft_config = PeftConfig.from_json_file(cfg_path)
+    model = get_peft_model(base, peft_config)
+
+    # 3) Load the LoRA weights from your .safetensors
+    state_dict = load_safetensors(weights_path, framework="pt")
+    model.load_state_dict(state_dict, strict=False)
+
+    model.eval()
+
+    # 4) Processor stays the same
     processor = WhisperProcessor.from_pretrained("unsloth/whisper-large-v3")
 
-    # 4) Build the HF ASR pipeline
+    # 5) Build the HF ASR pipeline
     return pipeline(
         task="automatic-speech-recognition",
         model=model,
         tokenizer=processor.tokenizer,
         feature_extractor=processor.feature_extractor,
-        return_language=True,        # if you’d like language detection
-        torch_dtype=torch.float16,   # match your model dtype
-        # no device=… here: device_map="auto" on the model does it
+        return_language=True,
+        torch_dtype=torch.float16,
     )
 
 def transcribe(asr, audio_bytes: bytes) -> str:
-    """Read raw bytes via soundfile, send to the pipeline, return text."""
-    # 1) Load into numpy array + sampling rate
-    audio_buffer = io.BytesIO(audio_bytes)
-    data, sr = sf.read(audio_buffer)  # data: np.ndarray shape (n,) or (n,channels)
-    # 2) If stereo/multi, average to mono
+    buf = io.BytesIO(audio_bytes)
+    data, sr = sf.read(buf)
     if data.ndim > 1:
         data = data.mean(axis=1)
-    # 3) Normalize if ints
     if np.issubdtype(data.dtype, np.integer):
         data = data.astype(np.float32) / np.iinfo(data.dtype).max
 
-    # 4) Run ASR pipeline (will resample internally via torchaudio)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         out = asr({"array": data, "sampling_rate": sr})
@@ -83,13 +92,14 @@ def main():
         st.info("Waiting for you to upload an audio file.")
         return
 
-    # Play back the upload
     st.audio(uploaded, format=uploaded.type)
 
-    # Load (or grab cached) pipeline
-    asr = load_asr()
+    try:
+        asr = load_asr()
+    except Exception as e:
+        st.error(str(e))
+        return
 
-    # Transcribe
     with st.spinner("Transcribing… this may take a few seconds for long files"):
         text = transcribe(asr, uploaded.getvalue())
 

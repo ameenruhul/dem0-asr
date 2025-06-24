@@ -1,7 +1,8 @@
-streamlit
-torch
-torchaudio
-transformers
-peft
-soundfile
-numpy
+streamlit==1.46.0
+torch==2.7.1
+torchaudio==2.7.1
+transformers==4.52.4
+peft==0.15.2
+safetensors==0.5.3
+soundfile==0.13.1
+numpy==2.3.1
