@@ -1,12 +1,20 @@
-import streamlit as st, io, numpy as np, torch, warnings
-from pydub import AudioSegment
+# app.py
+import streamlit as st
+import torch
+import numpy as np
+import io
+import warnings
+import soundfile as sf
 from transformers import (
-    WhisperProcessor, WhisperForConditionalGeneration, pipeline
+    WhisperProcessor,
+    WhisperForConditionalGeneration,
+    pipeline
 )
 from peft import PeftModelForSeq2SeqLM
 
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
 def load_asr():
+    """Load Whisper v3 + LoRA adapter once."""
     base = WhisperForConditionalGeneration.from_pretrained(
         "unsloth/whisper-large-v3",
         torch_dtype=torch.float16,
@@ -28,27 +36,40 @@ def load_asr():
         return_language=True,
         torch_dtype=torch.float16
     )
+    # Force Bengali
     asr.model.generation_config.language = "bn"
     asr.model.generation_config.forced_decoder_ids = None
     return asr
 
 def transcribe(asr, audio_bytes):
-    audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
-    samples = np.array(audio.get_array_of_samples(), np.float32)
-    if audio.channels > 1:
-        samples = samples.reshape(-1,audio.channels).mean(axis=1)
-    samples /= np.iinfo(audio.array_type).max
-    sr = audio.frame_rate
+    """Read audio bytes via soundfile and run inference."""
+    # Read into NumPy array
+    data, sr = sf.read(io.BytesIO(audio_bytes), dtype="float32")
+    # If stereo, convert to mono
+    if data.ndim > 1:
+        data = data.mean(axis=1)
+    # Normalize to [-1,1]
+    if data.dtype.kind == "i":
+        data = data / np.iinfo(data.dtype).max
+    # Run pipeline (long audio auto‐chunks under the hood)
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore")
-        out = asr({"array": samples, "sampling_rate": sr})
+        out = asr({"array": data, "sampling_rate": sr}, return_timestamps=False)
     return out["text"]
 
-st.title("🎙️ Bengali Whisper ASR")
-u = st.file_uploader("Upload audio", type=["wav","mp3","flac","m4a","aac"])
-if u:
-    st.audio(u)
-    asr = load_asr()
-    txt = transcribe(asr, u.getvalue())
-    st.subheader("Transcription")
-    st.write(txt)
+def main():
+    st.set_page_config(page_title="Bengali Whisper ASR", layout="wide")
+    st.title("🎙️ Bengali Whisper ASR Demo")
+    st.write("Upload a WAV/FLAC file (librosa/libsndfile‐supported) to transcribe in Bengali.")
+
+    uploaded = st.file_uploader("Choose audio", type=["wav","flac"])
+    if uploaded:
+        st.audio(uploaded, format=uploaded.type)
+        asr = load_asr()
+        with st.spinner("Transcribing…"):
+            text = transcribe(asr, uploaded.getvalue())
+        st.subheader("Transcription")
+        st.write(text)
+
+if __name__ == "__main__":
+    main()
