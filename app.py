@@ -1,3 +1,5 @@
+# app.py
+
 import streamlit as st
 import io
 import os
@@ -13,36 +15,39 @@ from transformers import (
 )
 from peft import PeftModelForSeq2SeqLM
 
-# Application version
-VERSION = "v1.0.0"
+# change these to match your repo layout:
+BASE_DIR = os.path.dirname(__file__)
+BASE_MODEL_DIR = os.path.join(BASE_DIR, "whisper-large-v3")
+PEFT_MODEL_DIR = os.path.join(BASE_DIR, "final_optimized_model")
 
 @st.cache_resource(show_spinner=False)
 def load_asr():
-    """Load base Whisper and LoRA adapter into an ASR pipeline."""
-    # 1) Load the base multilingual Whisper (cached locally)
+    """Load base Whisper and LoRA adapter into an ASR pipeline, all offline."""
+    # 1) Load the base multilingual Whisper from local folder
+    if not os.path.isdir(BASE_MODEL_DIR):
+        raise FileNotFoundError(f"Base Whisper model folder not found at {BASE_MODEL_DIR}")
     base = WhisperForConditionalGeneration.from_pretrained(
-        "unsloth/whisper-large-v3",
+        BASE_MODEL_DIR,
         torch_dtype=torch.float16,
         device_map="auto",
-        local_files_only=True,       # don’t try to download
+        local_files_only=True,
     )
 
     # 2) Load your fine-tuned LoRA weights from the local folder
-    peft_dir = os.path.join(os.path.dirname(__file__), "final_optimized_model")
-    if not os.path.isdir(peft_dir):
-        raise FileNotFoundError(f"LoRA weights folder not found at {peft_dir}")
+    if not os.path.isdir(PEFT_MODEL_DIR):
+        raise FileNotFoundError(f"LoRA weights folder not found at {PEFT_MODEL_DIR}")
     model = PeftModelForSeq2SeqLM.from_pretrained(
         base,
-        peft_dir,
+        PEFT_MODEL_DIR,
         torch_dtype=torch.float16,
         device_map="auto",
-        local_files_only=True,       # don’t try to download
+        local_files_only=True,
     ).eval()
 
-    # 3) Load processor for both feature extractor & tokenizer
+    # 3) Load processor (feature_extractor + tokenizer) from same local folder
     processor = WhisperProcessor.from_pretrained(
-        "unsloth/whisper-large-v3",
-        local_files_only=True
+        BASE_MODEL_DIR,
+        local_files_only=True,
     )
 
     # 4) Build the HF ASR pipeline
@@ -74,14 +79,12 @@ def transcribe(asr, audio_bytes: bytes) -> str:
 def main():
     st.set_page_config(page_title="Whisper-LoRA ASR Demo", layout="wide")
     st.title("🎙️ Bengali Whisper-LoRA Transcription")
-
-    # Display version
-    st.caption(f"App version: {VERSION}")
+    st.caption("App version: v1.0.1")
 
     st.markdown(
         """
         Upload a Bengali audio file (wav, flac, m4a, mp3…).  
-        The model will auto-chunk long audio and run on GPU if available.
+        Everything runs offline from your local model folders.
         """
     )
 
