@@ -23,19 +23,20 @@ def load_asr():
         torch_dtype=torch.float16,
         device_map="auto",
     )
-    # 2) Apply your fine-tuned LoRA weights
+    # 2) Apply your fine-tuned LoRA weights from local folder only
     model = PeftModelForSeq2SeqLM.from_pretrained(
         base,
         "/workspace/training_outputs/final_optimized_model",
         torch_dtype=torch.float16,
         device_map="auto",
+        local_files_only=True,    # ← prevents any Hub download attempts
     ).eval()
 
     # 3) Load processor for both feature extractor & tokenizer
     processor = WhisperProcessor.from_pretrained("unsloth/whisper-large-v3")
 
     # 4) Build the HF ASR pipeline
-    asr = pipeline(
+    return pipeline(
         task="automatic-speech-recognition",
         model=model,
         tokenizer=processor.tokenizer,
@@ -44,7 +45,6 @@ def load_asr():
         torch_dtype=torch.float16,   # match your model dtype
         # no device=… here: device_map="auto" on the model does it
     )
-    return asr
 
 def transcribe(asr, audio_bytes: bytes) -> str:
     """Read raw bytes via soundfile, send to the pipeline, return text."""
