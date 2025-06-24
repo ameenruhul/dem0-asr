@@ -1,5 +1,3 @@
-# app.py
-
 import streamlit as st
 import io
 import os
@@ -13,45 +11,42 @@ from transformers import (
     WhisperForConditionalGeneration,
     pipeline
 )
-from peft import PeftConfig, get_peft_model
-from safetensors.torch import load_file as load_safetensors
+from peft import PeftModelForSeq2SeqLM
+
+# Application version
+VERSION = "v1.0.0"
 
 @st.cache_resource(show_spinner=False)
 def load_asr():
-    """Load base Whisper + manually attach your local LoRA adapter."""
-    # 1) Base multilingual Whisper in float16, auto‐sharded on GPU/CPU
+    """Load base Whisper and LoRA adapter into an ASR pipeline."""
+    # 1) Load the base multilingual Whisper (cached locally)
     base = WhisperForConditionalGeneration.from_pretrained(
         "unsloth/whisper-large-v3",
         torch_dtype=torch.float16,
         device_map="auto",
+        local_files_only=True,       # don’t try to download
     )
 
-    # 2) Load your adapter config & build the PEFT wrapper
-    adapter_dir = "/workspace/training_outputs/final_optimized_model"
-    cfg_path = os.path.join(adapter_dir, "adapter_config.json")
-    weights_path = os.path.join(adapter_dir, "adapter_model.safetensors")
+    # 2) Load your fine-tuned LoRA weights from the local folder
+    peft_dir = os.path.join(os.path.dirname(__file__), "final_optimized_model")
+    if not os.path.isdir(peft_dir):
+        raise FileNotFoundError(f"LoRA weights folder not found at {peft_dir}")
+    model = PeftModelForSeq2SeqLM.from_pretrained(
+        base,
+        peft_dir,
+        torch_dtype=torch.float16,
+        device_map="auto",
+        local_files_only=True,       # don’t try to download
+    ).eval()
 
-    if not os.path.isfile(cfg_path) or not os.path.isfile(weights_path):
-        raise FileNotFoundError(
-            "Couldn’t find adapter_config.json or adapter_model.safetensors in:\n"
-            f"  {adapter_dir}\n"
-            "Did you run `peft_model.save_pretrained(...)` when training?"
-        )
+    # 3) Load processor for both feature extractor & tokenizer
+    processor = WhisperProcessor.from_pretrained(
+        "unsloth/whisper-large-v3",
+        local_files_only=True
+    )
 
-    peft_config = PeftConfig.from_json_file(cfg_path)
-    model = get_peft_model(base, peft_config)
-
-    # 3) Load the LoRA weights from your .safetensors
-    state_dict = load_safetensors(weights_path, framework="pt")
-    model.load_state_dict(state_dict, strict=False)
-
-    model.eval()
-
-    # 4) Processor stays the same
-    processor = WhisperProcessor.from_pretrained("unsloth/whisper-large-v3")
-
-    # 5) Build the HF ASR pipeline
-    return pipeline(
+    # 4) Build the HF ASR pipeline
+    asr = pipeline(
         task="automatic-speech-recognition",
         model=model,
         tokenizer=processor.tokenizer,
@@ -59,10 +54,12 @@ def load_asr():
         return_language=True,
         torch_dtype=torch.float16,
     )
+    return asr
 
 def transcribe(asr, audio_bytes: bytes) -> str:
-    buf = io.BytesIO(audio_bytes)
-    data, sr = sf.read(buf)
+    """Read raw bytes via soundfile, send to the pipeline, return text."""
+    audio_buffer = io.BytesIO(audio_bytes)
+    data, sr = sf.read(audio_buffer)
     if data.ndim > 1:
         data = data.mean(axis=1)
     if np.issubdtype(data.dtype, np.integer):
@@ -78,6 +75,9 @@ def main():
     st.set_page_config(page_title="Whisper-LoRA ASR Demo", layout="wide")
     st.title("🎙️ Bengali Whisper-LoRA Transcription")
 
+    # Display version
+    st.caption(f"App version: {VERSION}")
+
     st.markdown(
         """
         Upload a Bengali audio file (wav, flac, m4a, mp3…).  
@@ -86,7 +86,8 @@ def main():
     )
 
     uploaded = st.file_uploader(
-        "Choose an audio file", type=["wav","flac","mp3","m4a","aac"]
+        "Choose an audio file",
+        type=["wav", "flac", "mp3", "m4a", "aac"]
     )
     if not uploaded:
         st.info("Waiting for you to upload an audio file.")
@@ -94,12 +95,7 @@ def main():
 
     st.audio(uploaded, format=uploaded.type)
 
-    try:
-        asr = load_asr()
-    except Exception as e:
-        st.error(str(e))
-        return
-
+    asr = load_asr()
     with st.spinner("Transcribing… this may take a few seconds for long files"):
         text = transcribe(asr, uploaded.getvalue())
 
